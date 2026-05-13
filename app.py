@@ -2833,7 +2833,60 @@ def aplicar_margens_gw_visual(df, caminho_gw):
     return enriched
 
 
+def resolve_gw_visual_source_path():
+    caminho = st.session_state.get("caminho_b_temp")
+    if caminho and Path(str(caminho)).exists():
+        return str(caminho)
+
+    stored = st.session_state.get("up_b_stored")
+    if stored is None:
+        return None
+
+    try:
+        caminho = salvar_upload_pdf(stored, "GW")
+    except Exception:
+        return None
+    return caminho if caminho and Path(str(caminho)).exists() else None
+
+
+def ensure_gw_margin_visual(df, caminho_gw=None):
+    if df is None or df.empty:
+        return df
+
+    margin_column = None
+    if "Margem B" in df.columns:
+        margin_column = "Margem B"
+    elif "Margem GW" in df.columns:
+        margin_column = "Margem GW"
+
+    if not margin_column:
+        return df
+
+    existing = df[margin_column].fillna("").astype(str).str.strip()
+    if existing[~existing.isin(["", "-", "None", "Não encontrado", "nan"])].any():
+        return df
+
+    resolved_path = caminho_gw or resolve_gw_visual_source_path()
+    if not resolved_path:
+        return df
+
+    if margin_column == "Margem B":
+        return aplicar_margens_gw_visual(df, resolved_path)
+
+    enriched = aplicar_margens_gw_visual(df.rename(columns={"Margem GW": "Margem B"}), resolved_path)
+    return enriched.rename(columns={"Margem B": "Margem GW"})
+
+
+def clear_export_caches():
+    for fn in [build_export_summary_rows, build_excel_bytes, build_executive_pdf_bytes, build_detailed_pdf_bytes]:
+        try:
+            fn.clear()
+        except Exception:
+            pass
+
+
 def prepare_conference_dataframe(df, tolerancia=0.50):
+    df = ensure_gw_margin_visual(df)
     diff_col = get_result_diff_column(df)
     prepared = df.copy().rename(
         columns={
@@ -4323,6 +4376,7 @@ def update_processing_view(status_box, current_step, progress_value, progress_te
         st.progress(progress_value, text=progress_text)
 
 def clear_audit_workspace():
+    clear_export_caches()
     reset_audit_state()
     for key in list(st.session_state.keys()):
         if key.startswith("up_a_widget_") or key.startswith("up_b_widget_"):
@@ -4335,6 +4389,8 @@ def clear_audit_workspace():
     st.session_state.pop("audit_error", None)
     st.session_state.pop("audit_error_details", None)
     st.session_state.pop("audit_debug", None)
+    st.session_state.pop("caminho_a_temp", None)
+    st.session_state.pop("caminho_b_temp", None)
     st.session_state.processing = False
 
 
@@ -4823,6 +4879,7 @@ elif page == "Auditoria":
             update_processing_view(status_box, 4, 78, "Aplicando tolerância")
             result_df = linhas_para_dataframe(resultado["linhas"])
             result_df = aplicar_margens_gw_visual(result_df, caminho_b)
+            result_df = ensure_gw_margin_visual(result_df, caminho_b)
             summary = normalizar_resumo_motor(resultado["resumo"])
 
             set_audit_debug(
@@ -4854,8 +4911,11 @@ elif page == "Auditoria":
                     "nome_a": get_upload_name(file_a),
                     "nome_b": get_upload_name(file_b),
                     "tol": tolerance,
+                    "caminho_a_temp": caminho_a,
+                    "caminho_b_temp": caminho_b,
                 }
             )
+            clear_export_caches()
             status_box.empty()
         except Exception as exc:
             mensagem = str(exc)
@@ -4875,7 +4935,10 @@ elif page == "Auditoria":
 
     if st.session_state.get("df_res") is not None and not st.session_state["df_res"].empty:
         with results_box.container():
-            result = st.session_state["df_res"]
+            result = ensure_gw_margin_visual(st.session_state["df_res"], st.session_state.get("caminho_b_temp"))
+            if not result.equals(st.session_state["df_res"]):
+                st.session_state["df_res"] = result
+                clear_export_caches()
             summary = st.session_state["resumo"]
             render_kpis(summary, result)
             render_chart(result)
