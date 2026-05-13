@@ -2,9 +2,11 @@
 import tempfile
 import importlib
 import re
+from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
 
+import fitz
 import pandas as pd
 import plotly.express as px
 import pdfplumber
@@ -2802,8 +2804,36 @@ def format_identifier(value):
 
 @st.cache_data(show_spinner=False)
 def extrair_margens_gw_visual(caminho_pdf):
+    caminho = str(caminho_pdf)
+
+    try:
+        margens = {}
+        doc = fitz.open(caminho)
+        try:
+            for page in doc:
+                groups = defaultdict(list)
+                for x0, y0, x1, y1, text, *_ in page.get_text("blocks"):
+                    groups[round(x0, 1)].append(text)
+
+                for texts in groups.values():
+                    lines = []
+                    for text in texts:
+                        lines.extend([line.strip() for line in text.splitlines() if line.strip()])
+
+                    ctes = [line for line in lines if re.fullmatch(r"0*\d{4,}", line)]
+                    pcts = [line for line in lines if re.fullmatch(r"-?\d{1,3}(?:\.\d{3})*,\d{2}%", line)]
+                    if ctes and pcts:
+                        margens[str(int(ctes[-1]))] = pcts[-1]
+        finally:
+            doc.close()
+
+        if margens:
+            return margens
+    except Exception:
+        pass
+
     margens = {}
-    with pdfplumber.open(str(caminho_pdf)) as pdf:
+    with pdfplumber.open(caminho) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
             for line in text.splitlines():
