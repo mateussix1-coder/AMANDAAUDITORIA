@@ -6,11 +6,15 @@ from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
 
-import fitz
 import pandas as pd
 import plotly.express as px
 import pdfplumber
 import streamlit as st
+
+try:
+    import fitz
+except ModuleNotFoundError:
+    fitz = None
 
 import auditoria_engine as auditoria_io
 auditoria_io = importlib.reload(auditoria_io)
@@ -2806,43 +2810,47 @@ def format_identifier(value):
 def extrair_margens_gw_visual(caminho_pdf):
     caminho = str(caminho_pdf)
 
+    if fitz is not None:
+        try:
+            margens = {}
+            doc = fitz.open(caminho)
+            try:
+                for page in doc:
+                    groups = defaultdict(list)
+                    for x0, y0, x1, y1, text, *_ in page.get_text("blocks"):
+                        groups[round(x0, 1)].append(text)
+
+                    for texts in groups.values():
+                        lines = []
+                        for text in texts:
+                            lines.extend([line.strip() for line in text.splitlines() if line.strip()])
+
+                        ctes = [line for line in lines if re.fullmatch(r"0*\d{4,}", line)]
+                        pcts = [line for line in lines if re.fullmatch(r"-?\d{1,3}(?:\.\d{3})*,\d{2}%", line)]
+                        if ctes and pcts:
+                            margens[str(int(ctes[-1]))] = pcts[-1]
+            finally:
+                doc.close()
+
+            if margens:
+                return margens
+        except Exception:
+            pass
+
     try:
         margens = {}
-        doc = fitz.open(caminho)
-        try:
-            for page in doc:
-                groups = defaultdict(list)
-                for x0, y0, x1, y1, text, *_ in page.get_text("blocks"):
-                    groups[round(x0, 1)].append(text)
-
-                for texts in groups.values():
-                    lines = []
-                    for text in texts:
-                        lines.extend([line.strip() for line in text.splitlines() if line.strip()])
-
-                    ctes = [line for line in lines if re.fullmatch(r"0*\d{4,}", line)]
-                    pcts = [line for line in lines if re.fullmatch(r"-?\d{1,3}(?:\.\d{3})*,\d{2}%", line)]
-                    if ctes and pcts:
-                        margens[str(int(ctes[-1]))] = pcts[-1]
-        finally:
-            doc.close()
-
-        if margens:
-            return margens
+        with pdfplumber.open(caminho) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                for line in text.splitlines():
+                    match = RE_GW_MARGIN_VISUAL.match(line.strip())
+                    if not match:
+                        continue
+                    cte = str(int(match.group(1)))
+                    margens[cte] = match.group(2)
+        return margens
     except Exception:
-        pass
-
-    margens = {}
-    with pdfplumber.open(caminho) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-            for line in text.splitlines():
-                match = RE_GW_MARGIN_VISUAL.match(line.strip())
-                if not match:
-                    continue
-                cte = str(int(match.group(1)))
-                margens[cte] = match.group(2)
-    return margens
+        return {}
 
 
 def aplicar_margens_gw_visual(df, caminho_gw):
