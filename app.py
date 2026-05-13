@@ -1,11 +1,13 @@
 ﻿import html
 import tempfile
 import importlib
+import re
 from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import pdfplumber
 import streamlit as st
 
 import auditoria_engine as auditoria_io
@@ -40,6 +42,7 @@ VISUAL_DIFF_FILTERS = {
     "R$ 1,00": 1.00,
     "Personalizado": None,
 }
+RE_GW_MARGIN_VISUAL = re.compile(r"^\s*0*(\d{4,})\b.*?(-?\d{1,3}(?:\.\d{3})*,\d{2}%)\s*$")
 PROCESSING_STEPS = [
     ("Lendo Relatório A", "Validando o arquivo temporário da base ATUA."),
     ("Lendo Relatório B", "Validando o arquivo temporário da base GW."),
@@ -49,7 +52,7 @@ PROCESSING_STEPS = [
 ]
 
 
-st.set_page_config(page_title=BRAND_NAME, layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title=BRAND_NAME, layout="wide", initial_sidebar_state="collapsed")
 
 def ui(text):
     if not isinstance(text, str):
@@ -1095,6 +1098,15 @@ div[data-baseweb="select"] input {
     background: #f8fbff;
 }
 
+.audit-table tbody tr.row-missing td {
+    background: #fff7ed !important;
+    color: #9a3412;
+}
+
+.audit-table tbody tr.row-missing:hover td {
+    background: #ffedd5 !important;
+}
+
 .audit-table .cell-cte {
     font-weight: 800;
 }
@@ -1107,6 +1119,18 @@ div[data-baseweb="select"] input {
 
 .audit-table .cell-observation {
     min-width: 280px;
+}
+
+.audit-table .cell-diff-critical {
+    background: #fee2e2 !important;
+    color: #991b1b !important;
+    font-weight: 800;
+}
+
+.audit-table .cell-diff-tolerance {
+    background: #e8f3ff !important;
+    color: #1d4ed8 !important;
+    font-weight: 800;
 }
 
 .audit-table .cell-empty {
@@ -1744,6 +1768,802 @@ div[data-testid="stProgressBar"] > div > div {
 
 st.markdown(CSS, unsafe_allow_html=True)
 
+COMPACT_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@600;700&display=swap');
+
+:root {
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --surface-soft: #f8fafc;
+    --line: #e5e7eb;
+    --text: #111827;
+    --muted: #475569;
+    --primary: #4f46e5;
+    --primary-dark: #4338ca;
+    --ok: #16a34a;
+    --ok-soft: #f0fdf4;
+    --round: #2563eb;
+    --round-soft: #eff6ff;
+    --div: #dc2626;
+    --div-soft: #fef2f2;
+    --miss: #f97316;
+    --miss-soft: #fff7ed;
+    --shadow-sm: 0 18px 38px rgba(15, 23, 42, 0.08);
+    --shadow-card: 0 20px 60px rgba(15, 23, 42, 0.08);
+    --shadow-lift: 0 26px 70px rgba(79, 70, 229, 0.18);
+    --glow: radial-gradient(circle at top, rgba(99, 102, 241, 0.18), rgba(248, 250, 252, 0) 48%);
+}
+
+.stApp {
+    background:
+        radial-gradient(circle at top left, rgba(79, 70, 229, 0.08), transparent 32%),
+        radial-gradient(circle at top right, rgba(245, 158, 11, 0.08), transparent 26%),
+        linear-gradient(180deg, #f8fafc 0%, #f3f6fb 100%) !important;
+    font-family: "Manrope", "Segoe UI", sans-serif !important;
+}
+
+[data-testid="stSidebar"],
+[data-testid="collapsedControl"] {
+    display: none !important;
+}
+
+.block-container {
+    max-width: 1240px !important;
+    padding: 18px 20px 28px 20px !important;
+}
+
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%) !important;
+    border: 1px solid rgba(229, 231, 235, 0.9) !important;
+    border-radius: 22px !important;
+    box-shadow: var(--shadow-sm) !important;
+    backdrop-filter: blur(10px) !important;
+}
+
+.compact-header-shell {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: rgba(248, 250, 252, 0.9);
+    backdrop-filter: blur(10px);
+    padding-bottom: 10px;
+    margin-bottom: 4px;
+}
+
+.compact-header {
+    position: relative;
+    background:
+        linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(244,247,255,0.96) 100%);
+    border: 1px solid rgba(255,255,255,0.86);
+    border-radius: 22px;
+    padding: 15px 20px;
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+}
+
+.compact-header::before {
+    content: "";
+    position: absolute;
+    inset: -20% auto auto -10%;
+    width: 240px;
+    height: 240px;
+    background: var(--glow);
+    pointer-events: none;
+}
+
+.compact-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.compact-brand-mark {
+    width: 48px;
+    height: 48px;
+    flex-shrink: 0;
+    filter: drop-shadow(0 10px 18px rgba(16, 35, 58, 0.16));
+}
+
+.compact-brand-title {
+    color: var(--text);
+    font-size: 1.24rem;
+    font-weight: 900;
+    letter-spacing: 0.03em;
+}
+
+.compact-brand-title strong {
+    color: #f59e0b;
+    font-weight: 900;
+}
+
+.compact-brand-subtitle {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+    margin-top: 2px;
+}
+
+.header-status-pill {
+    height: 40px;
+    border-radius: 999px;
+    border: 1px solid rgba(191, 219, 254, 0.8);
+    background: linear-gradient(180deg, #f8fbff 0%, #eaf2ff 100%);
+    color: #1d4ed8;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.83rem;
+    font-weight: 800;
+    padding: 0 14px;
+    box-shadow: 0 12px 24px rgba(37, 99, 235, 0.12);
+}
+
+.menu-shell {
+    margin: 8px 0 18px 0;
+}
+
+.menu-caption,
+.compact-field-label {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+
+[data-testid="stRadio"] > label,
+[data-testid="stSelectbox"] > label,
+[data-testid="stNumberInput"] > label,
+[data-testid="stTextInput"] > label {
+    color: var(--muted) !important;
+    font-size: 0.8rem !important;
+    font-weight: 700 !important;
+}
+
+[data-testid="stRadio"] [role="radiogroup"] {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+}
+
+[data-testid="stRadio"] [role="radiogroup"] label {
+    border-radius: 12px !important;
+    border: 1px solid rgba(226, 232, 240, 0.95) !important;
+    color: var(--text) !important;
+    padding: 8px 14px !important;
+    min-height: 38px !important;
+    font-weight: 800 !important;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%) !important;
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.04) !important;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease !important;
+}
+
+[data-testid="stRadio"] [role="radiogroup"] label:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 14px 24px rgba(15, 23, 42, 0.08) !important;
+}
+
+[data-testid="stRadio"] [role="radiogroup"] label[data-checked="true"] {
+    background: linear-gradient(135deg, var(--primary) 0%, #6d5dfc 100%) !important;
+    color: #ffffff !important;
+    border-color: var(--primary) !important;
+    box-shadow: 0 16px 34px rgba(79, 70, 229, 0.28) !important;
+}
+
+.stButton > button[kind="primary"] {
+    height: 48px !important;
+    border-radius: 14px !important;
+    border: 0 !important;
+    background: linear-gradient(135deg, #4f46e5 0%, #6d5dfc 48%, #8b5cf6 100%) !important;
+    color: #ffffff !important;
+    font-weight: 800 !important;
+    box-shadow: var(--shadow-lift) !important;
+    transition: transform 0.18s ease, box-shadow 0.18s ease !important;
+}
+
+.stButton > button[kind="primary"]:hover {
+    background: var(--primary-dark) !important;
+    transform: translateY(-2px);
+    box-shadow: 0 32px 82px rgba(79, 70, 229, 0.24) !important;
+}
+
+.stButton > button,
+.stDownloadButton > button {
+    min-height: 40px !important;
+    border-radius: 12px !important;
+    border: 1px solid rgba(226, 232, 240, 0.95) !important;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%) !important;
+    color: var(--text) !important;
+    font-weight: 800 !important;
+    box-shadow: 0 10px 22px rgba(15, 23, 42, 0.04) !important;
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+    border-color: #cbd5e1 !important;
+    background: linear-gradient(180deg, #ffffff 0%, #eff6ff 100%) !important;
+}
+
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
+[data-baseweb="select"] > div,
+[data-baseweb="input"] > div,
+[data-baseweb="base-input"] > div {
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%) !important;
+    border-color: rgba(226, 232, 240, 0.95) !important;
+    color: var(--text) !important;
+    border-radius: 12px !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.7), 0 8px 18px rgba(15,23,42,0.03) !important;
+}
+
+.section-head {
+    margin-bottom: 12px;
+}
+
+.section-title {
+    color: var(--text);
+    font-size: 1.15rem;
+    font-weight: 900;
+    margin: 0;
+}
+
+.section-subtitle {
+    color: var(--muted);
+    font-size: 0.86rem;
+    font-weight: 500;
+    margin-top: 4px;
+}
+
+.upload-panel-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.upload-panel-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(180deg, #f1f5ff 0%, #e8ecff 100%);
+    color: var(--primary);
+    flex-shrink: 0;
+    box-shadow: 0 14px 24px rgba(79, 70, 229, 0.12);
+}
+
+.upload-panel-title {
+    color: var(--text);
+    font-size: 1rem;
+    font-weight: 800;
+}
+
+.upload-panel-subtitle {
+    color: var(--muted);
+    font-size: 0.84rem;
+    font-weight: 500;
+    margin-top: 2px;
+}
+
+[data-testid="stFileUploaderDropzone"] {
+    min-height: 176px !important;
+    background:
+        linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(246,248,253,0.96) 100%) !important;
+    border: 1px dashed #cbd5e1 !important;
+    border-radius: 18px !important;
+    padding: 20px !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.9), 0 14px 28px rgba(15, 23, 42, 0.03) !important;
+}
+
+[data-testid="stFileUploaderDropzone"] section,
+[data-testid="stFileUploaderDropzone"] small,
+[data-testid="stFileUploaderDropzone"] span,
+[data-testid="stFileUploaderDropzone"] p {
+    color: var(--muted) !important;
+}
+
+[data-testid="stFileUploaderDropzone"] button {
+    border-radius: 10px !important;
+    border: 1px solid #dbeafe !important;
+    background: #eef2ff !important;
+    color: var(--primary) !important;
+    font-weight: 800 !important;
+}
+
+.upload-ready-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 8px 0 10px 0;
+}
+
+.upload-ready-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #ffffff 0%, #f2f6fc 100%);
+    border: 1px solid #dbe3ef;
+    color: var(--text);
+    font-size: 0.84rem;
+    font-weight: 700;
+    box-shadow: 0 10px 20px rgba(15, 23, 42, 0.05);
+}
+
+.upload-ready-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #f7fff8 0%, #ebfff0 100%);
+    border: 1px solid #bbf7d0;
+    color: var(--ok);
+    font-size: 0.77rem;
+    font-weight: 800;
+    box-shadow: 0 10px 18px rgba(22, 163, 74, 0.08);
+}
+
+.upload-ready-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: currentColor;
+}
+
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.summary-card {
+    background: linear-gradient(180deg, #ffffff 0%, #fafcff 100%);
+    border: 1px solid rgba(226, 232, 240, 0.95);
+    border-radius: 18px;
+    padding: 16px;
+    box-shadow: 0 14px 28px rgba(15, 23, 42, 0.05);
+    transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.summary-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 20px 44px rgba(15, 23, 42, 0.08);
+}
+
+.summary-card small {
+    display: block;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 12px;
+}
+
+.summary-card b {
+    display: block;
+    color: var(--text);
+    font-size: 1.8rem;
+    line-height: 1;
+    font-weight: 900;
+}
+
+.summary-card span {
+    display: block;
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin-top: 10px;
+    line-height: 1.45;
+}
+
+.summary-card.ok { background: linear-gradient(180deg, #f6fff8 0%, #eefcf2 100%); border-color: #bbf7d0; }
+.summary-card.ok b { color: var(--ok); }
+.summary-card.round { background: linear-gradient(180deg, #f7fbff 0%, #edf5ff 100%); border-color: #bfdbfe; }
+.summary-card.round b { color: var(--round); }
+.summary-card.div { background: linear-gradient(180deg, #fff8f8 0%, #fff1f1 100%); border-color: #fecaca; }
+.summary-card.div b { color: var(--div); }
+.summary-card.miss { background: linear-gradient(180deg, #fffaf5 0%, #fff4e8 100%); border-color: #fed7aa; }
+.summary-card.miss b { color: var(--miss); }
+.summary-card.impact { background: linear-gradient(180deg, #fffaf3 0%, #fff1de 100%); border-color: #fdba74; }
+.summary-card.impact b { color: #ea580c; font-size: 1.5rem; }
+
+.summary-note {
+    margin-top: 4px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: #ffffff;
+    border: 1px solid var(--line);
+    color: #334155;
+    font-size: 0.82rem;
+    font-weight: 500;
+    line-height: 1.6;
+}
+
+.detail-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin: 4px 0 14px 0;
+}
+
+.detail-metric {
+    background: #ffffff;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px 14px;
+}
+
+.detail-metric small {
+    color: var(--muted);
+}
+
+.detail-metric b {
+    color: var(--text);
+    font-size: 1.05rem;
+}
+
+.conference-note {
+    margin-top: 0;
+    background: #f8fafc;
+    border: 1px solid #dbe3ef;
+    color: var(--muted);
+}
+
+.table-shell {
+    margin-top: 10px;
+    border-radius: 16px;
+    border-color: var(--line);
+}
+
+.audit-results-shell {
+    max-height: 64vh;
+}
+
+.audit-table thead th {
+    background: #f8fafc;
+    color: var(--muted);
+}
+
+.audit-table tbody td {
+    font-size: 0.86rem;
+}
+
+.export-actions {
+    margin-top: 12px;
+}
+
+.export-note {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin-bottom: 10px;
+}
+
+.compact-footer {
+    margin-top: 22px;
+    padding: 16px 0 6px 0;
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.6;
+}
+
+.marketing-shell {
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: 16px;
+    margin-top: 6px;
+}
+
+.marketing-card {
+    position: relative;
+    background: linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(245,247,255,0.96) 100%);
+    border: 1px solid rgba(255,255,255,0.8);
+    border-radius: 24px;
+    padding: 24px;
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+}
+
+.marketing-card::before {
+    content: "";
+    position: absolute;
+    inset: auto -70px -80px auto;
+    width: 200px;
+    height: 200px;
+    border-radius: 999px;
+    background: radial-gradient(circle, rgba(79,70,229,0.14) 0%, rgba(79,70,229,0) 68%);
+    pointer-events: none;
+}
+
+.marketing-kicker {
+    color: var(--primary);
+    font-size: 0.78rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.marketing-title {
+    color: var(--text);
+    font-family: "Cormorant Garamond", serif;
+    font-size: 2.45rem;
+    line-height: 1;
+    font-weight: 900;
+    margin: 10px 0 12px 0;
+    letter-spacing: 0.01em;
+}
+
+.marketing-copy {
+    color: var(--muted);
+    font-size: 0.95rem;
+    line-height: 1.75;
+}
+
+.marketing-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 16px;
+}
+
+.marketing-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 999px;
+    border: 1px solid #dbe3ef;
+    background: #f8fafc;
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.marketing-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.marketing-feature {
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+    border: 1px solid rgba(226, 232, 240, 0.95);
+    border-radius: 18px;
+    padding: 16px;
+    box-shadow: 0 14px 28px rgba(15, 23, 42, 0.05);
+}
+
+.marketing-feature small {
+    display: block;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+.marketing-feature b {
+    display: block;
+    color: var(--text);
+    font-size: 1rem;
+    margin-bottom: 8px;
+}
+
+.marketing-feature span {
+    color: var(--muted);
+    font-size: 0.84rem;
+    line-height: 1.6;
+}
+
+.chart-card {
+    margin-top: 12px;
+}
+
+.marketing-hero {
+    display: grid;
+    grid-template-columns: 1.05fr 0.95fr;
+    gap: 18px;
+    align-items: stretch;
+}
+
+.marketing-visual {
+    position: relative;
+    min-height: 360px;
+    border-radius: 28px;
+    padding: 24px;
+    background:
+        radial-gradient(circle at top left, rgba(79, 70, 229, 0.28), rgba(79, 70, 229, 0) 34%),
+        radial-gradient(circle at bottom right, rgba(245, 158, 11, 0.22), rgba(245, 158, 11, 0) 32%),
+        linear-gradient(160deg, #0f172a 0%, #172554 48%, #312e81 100%);
+    box-shadow: 0 34px 90px rgba(15, 23, 42, 0.26);
+    overflow: hidden;
+}
+
+.marketing-visual::before {
+    content: "";
+    position: absolute;
+    inset: 16px;
+    border-radius: 24px;
+    border: 1px solid rgba(255,255,255,0.12);
+    pointer-events: none;
+}
+
+.visual-glow {
+    position: absolute;
+    inset: auto auto -50px -30px;
+    width: 220px;
+    height: 220px;
+    border-radius: 999px;
+    background: radial-gradient(circle, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0) 70%);
+}
+
+.visual-signature {
+    position: relative;
+    z-index: 2;
+    max-width: 320px;
+    filter: drop-shadow(0 18px 34px rgba(15, 23, 42, 0.35));
+}
+
+.marketing-visual .fv-wordmark-main {
+    color: rgba(255,255,255,0.94);
+}
+
+.marketing-visual .fv-wordmark-main strong {
+    color: #f6c56d;
+}
+
+.marketing-visual .fv-wordmark-tagline {
+    color: rgba(255,255,255,0.62);
+}
+
+.visual-float-row {
+    position: absolute;
+    right: 22px;
+    top: 24px;
+    display: grid;
+    gap: 12px;
+    width: 190px;
+    z-index: 3;
+}
+
+.visual-stat {
+    padding: 14px 15px;
+    border-radius: 18px;
+    background: rgba(255,255,255,0.14);
+    border: 1px solid rgba(255,255,255,0.18);
+    backdrop-filter: blur(14px);
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.24);
+}
+
+.visual-stat small {
+    display: block;
+    color: rgba(255,255,255,0.72);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 800;
+    margin-bottom: 7px;
+}
+
+.visual-stat b {
+    color: #ffffff;
+    font-size: 1.18rem;
+    font-weight: 900;
+}
+
+.visual-board {
+    position: absolute;
+    left: 24px;
+    right: 24px;
+    bottom: 24px;
+    z-index: 2;
+    padding: 18px;
+    border-radius: 24px;
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.14);
+    backdrop-filter: blur(16px);
+    box-shadow: 0 20px 46px rgba(15, 23, 42, 0.26);
+}
+
+.visual-board-title {
+    color: #ffffff;
+    font-size: 0.92rem;
+    font-weight: 800;
+    margin-bottom: 12px;
+}
+
+.visual-bars {
+    display: grid;
+    gap: 10px;
+}
+
+.visual-bar-row {
+    display: grid;
+    grid-template-columns: 82px 1fr 38px;
+    gap: 10px;
+    align-items: center;
+}
+
+.visual-bar-label {
+    color: rgba(255,255,255,0.78);
+    font-size: 0.76rem;
+    font-weight: 700;
+}
+
+.visual-bar-track {
+    height: 10px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.14);
+    overflow: hidden;
+}
+
+.visual-bar-fill {
+    height: 100%;
+    border-radius: inherit;
+    box-shadow: 0 10px 18px rgba(0,0,0,0.18);
+}
+
+.visual-bar-value {
+    color: #ffffff;
+    font-size: 0.78rem;
+    font-weight: 800;
+    text-align: right;
+}
+
+.chart-shell .section-subtitle,
+.chart-shell .summary-note,
+.marketing-copy,
+.marketing-feature span,
+.marketing-chip,
+.detail-metric small,
+.summary-card span,
+.summary-card small,
+.compact-field-label,
+.menu-caption,
+.conference-note,
+.export-note {
+    color: #475569 !important;
+}
+
+@media (max-width: 1100px) {
+    .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .marketing-shell { grid-template-columns: 1fr; }
+    .marketing-hero { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+    .block-container { padding: 16px 14px 26px 14px !important; }
+    .summary-grid,
+    .detail-grid { grid-template-columns: 1fr; }
+    .marketing-grid { grid-template-columns: 1fr; }
+    .visual-float-row {
+        position: static;
+        width: 100%;
+        margin-top: 18px;
+    }
+    .marketing-visual {
+        min-height: 460px;
+    }
+    .visual-board {
+        left: 18px;
+        right: 18px;
+        bottom: 18px;
+    }
+}
+</style>
+"""
+
+st.markdown(COMPACT_CSS, unsafe_allow_html=True)
+
 
 def icon_doc(size=20):
     return f"""
@@ -1886,44 +2706,134 @@ def get_result_diff_column(df):
     return raw_diff_col
 
 
-def build_observacao(status_base):
-    observations = {
-        "OK": "Sem diferença",
-        "OK por arredondamento": "Diferença dentro da tolerância",
-        "Divergente": "Divergência acima da tolerância",
-        "Faltante no A": "Existe no GW e não existe no ATUA",
-        "Faltante no B": "Existe no ATUA e não existe no GW",
-    }
-    return observations.get(status_base, "Conferir manualmente")
+def resolve_tolerance_value(tolerancia=None):
+    if tolerancia is None:
+        tolerancia = 0.50
+    return float(tolerancia)
+
+
+def classify_diff_bucket(value, tolerancia):
+    if value is None:
+        return "none"
+    try:
+        if pd.isna(value):
+            return "none"
+    except (TypeError, ValueError):
+        pass
+    abs_value = abs(float(value))
+    if abs_value == 0:
+        return "none"
+    if abs_value <= resolve_tolerance_value(tolerancia):
+        return "tolerance"
+    return "critical"
+
+
+def build_observacao(status_base, dif_empresa=None, dif_motorista=None, tolerancia=0.50):
+    if status_base == "OK":
+        return "Sem diferença"
+    if status_base == "OK por arredondamento":
+        return "Diferença dentro da tolerância"
+    if status_base == "Faltante no A":
+        return "Existe no GW e não existe no ATUA"
+    if status_base == "Faltante no B":
+        return "Existe no ATUA e não existe no GW"
+
+    empresa_bucket = classify_diff_bucket(dif_empresa, tolerancia)
+    motorista_bucket = classify_diff_bucket(dif_motorista, tolerancia)
+
+    if empresa_bucket == "critical" and motorista_bucket == "critical":
+        return "Divergência em empresa e motorista"
+    if empresa_bucket == "critical":
+        return "Divergência no frete empresa"
+    if motorista_bucket == "critical":
+        return "Divergência no frete motorista"
+    return "Divergência acima da tolerância"
 
 
 def format_optional_money(value):
     if value is None:
-        return "Não encontrado"
+        return "-"
     try:
         if pd.isna(value):
-            return "Não encontrado"
+            return "-"
     except (TypeError, ValueError):
         pass
     if isinstance(value, (int, float, Decimal)):
         return br_money(value)
+    if str(value).strip() in {"", "None", "Não encontrado"}:
+        return "-"
     return ui(str(value))
+
+
+def format_optional_margin(value):
+    if value is None:
+        return "-"
+    try:
+        if pd.isna(value):
+            return "-"
+    except (TypeError, ValueError):
+        pass
+    text = ui(str(value)).strip()
+    if not text or text in {"None", "Não encontrado"}:
+        return "-"
+    if text.endswith("%"):
+        return text
+    try:
+        numeric = float(text.replace("%", "").replace(".", "").replace(",", "."))
+        return f"{numeric:.2f}".replace(".", ",") + "%"
+    except ValueError:
+        return text
 
 
 def format_identifier(value):
     if value is None:
-        return "Não encontrado"
+        return "-"
     try:
         if pd.isna(value):
-            return "Não encontrado"
+            return "-"
     except (TypeError, ValueError):
         pass
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
+    if str(value).strip() in {"", "None", "Não encontrado"}:
+        return "-"
     return ui(str(value))
 
 
-def prepare_conference_dataframe(df):
+@st.cache_data(show_spinner=False)
+def extrair_margens_gw_visual(caminho_pdf):
+    margens = {}
+    with pdfplumber.open(str(caminho_pdf)) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            for line in text.splitlines():
+                match = RE_GW_MARGIN_VISUAL.match(line.strip())
+                if not match:
+                    continue
+                cte = str(int(match.group(1)))
+                margens[cte] = match.group(2)
+    return margens
+
+
+def aplicar_margens_gw_visual(df, caminho_gw):
+    if df is None or df.empty or "Margem B" not in df.columns or not caminho_gw:
+        return df
+    margem_map = extrair_margens_gw_visual(caminho_gw)
+    if not margem_map:
+        return df
+
+    enriched = df.copy()
+    current_values = enriched["Margem B"].tolist()
+    ctes = [format_identifier(value).lstrip("0") for value in enriched["CTE"].tolist()]
+
+    enriched["Margem B"] = [
+        current if pd.notna(current) and str(current).strip() not in ["", "None"] else margem_map.get(cte, None)
+        for current, cte in zip(current_values, ctes)
+    ]
+    return enriched
+
+
+def prepare_conference_dataframe(df, tolerancia=0.50):
     diff_col = get_result_diff_column(df)
     prepared = df.copy().rename(
         columns={
@@ -1938,11 +2848,27 @@ def prepare_conference_dataframe(df):
     if "Margem GW" not in prepared.columns:
         prepared["Margem GW"] = None
 
+    tolerancia_valor = resolve_tolerance_value(tolerancia)
     prepared["_Status Base"] = prepared["Status"].astype(str)
+    prepared["_Dif Empresa Num"] = pd.to_numeric(prepared["Dif. Empresa"], errors="coerce")
+    prepared["_Dif Motorista Num"] = pd.to_numeric(prepared["Dif. Motorista"], errors="coerce")
     prepared["_CTE Num"] = pd.to_numeric(prepared["CTE"], errors="coerce")
     prepared["_Maior Diferença Num"] = pd.to_numeric(prepared["Maior Diferença"], errors="coerce").fillna(0.0)
     prepared["_Status Ordem"] = prepared["_Status Base"].map(STATUS_ORDER_MAP).fillna(99)
-    prepared["Observação"] = prepared["_Status Base"].map(build_observacao)
+    prepared["_Empresa Visual"] = prepared["_Dif Empresa Num"].map(lambda value: classify_diff_bucket(value, tolerancia_valor))
+    prepared["_Motorista Visual"] = prepared["_Dif Motorista Num"].map(lambda value: classify_diff_bucket(value, tolerancia_valor))
+    prepared["_Linha Visual"] = prepared["_Status Base"].map(
+        lambda status: "missing" if status in ["Faltante no A", "Faltante no B"] else "normal"
+    )
+    prepared["Observação"] = prepared.apply(
+        lambda row: build_observacao(
+            row["_Status Base"],
+            row["_Dif Empresa Num"],
+            row["_Dif Motorista Num"],
+            tolerancia_valor,
+        ),
+        axis=1,
+    )
     prepared["Status"] = prepared["_Status Base"].replace(STATUS_DISPLAY_MAP)
     return prepared
 
@@ -1998,16 +2924,18 @@ def build_conference_display_table(prepared):
         "Motorista B",
         "Diferença",
         "Maior Diferença",
-        "Margem GW",
     ]
 
     visible = prepared[[column for column in table_columns if column in prepared.columns]].copy()
-    visible = visible.fillna("Não encontrado").replace({None: "Não encontrado", "": "Não encontrado", "None": "Não encontrado"})
+    visible = visible.fillna("-").replace({None: "-", "": "-", "None": "-", "Não encontrado": "-"})
     visible["CTE"] = visible["CTE"].map(format_identifier)
 
     for column in ["Empresa A", "Empresa B", "Dif. Empresa", "Motorista A", "Motorista B", "Dif. Motorista", "Maior Diferença", "Margem GW"]:
         if column in visible.columns:
-            visible[column] = visible[column].map(format_optional_money)
+            if column == "Margem GW":
+                visible[column] = visible[column].map(format_optional_margin)
+            else:
+                visible[column] = visible[column].map(format_optional_money)
 
     visible = visible.rename(columns={"Dif. Motorista": "Diferença"})
     visible["Observação"] = visible["Observação"].map(ui)
@@ -2027,8 +2955,8 @@ def build_detailed_counts_html(resumo):
 
 
 @st.cache_data(show_spinner=False)
-def build_export_summary_rows(df, resumo):
-    prepared = prepare_conference_dataframe(df)
+def build_export_summary_rows(df, resumo, tolerancia=0.50):
+    prepared = prepare_conference_dataframe(df, tolerancia)
     criticos = prepared[prepared["_Status Base"].isin(["Divergente", "Faltante no A", "Faltante no B"])].copy()
     dif_empresa_critica = float(round(pd.to_numeric(criticos.get("Dif. Empresa"), errors="coerce").fillna(0.0).sum(), 2)) if "Dif. Empresa" in criticos.columns else 0.0
     dif_motorista_critica = float(round(pd.to_numeric(criticos.get("Dif. Motorista"), errors="coerce").fillna(0.0).sum(), 2)) if "Dif. Motorista" in criticos.columns else 0.0
@@ -2056,14 +2984,14 @@ def build_export_criteria_rows(nome_a, nome_b, tolerancia):
     ]
 
 
-def build_export_frames(df):
-    prepared = prepare_conference_dataframe(df)
+def build_export_frames(df, tolerancia=0.50):
+    prepared = prepare_conference_dataframe(df, tolerancia)
     display_df, _ = build_conference_display_table(prepared)
     divergentes_df = display_df[display_df["Status"] == "Divergente"].copy()
     tolerancia_df = display_df[display_df["Status"] == "OK Arred."].copy()
     faltantes_df = display_df[display_df["Status"].isin(["Faltante no A", "Faltante no B"])].copy()
     criticos_df = display_df[display_df["Status"].isin(["Divergente", "Faltante no A", "Faltante no B"])].copy()
-    return display_df, divergentes_df, tolerancia_df, faltantes_df, criticos_df
+    return prepared, display_df, divergentes_df, tolerancia_df, faltantes_df, criticos_df
 
 
 @st.cache_data(show_spinner=False)
@@ -2075,13 +3003,16 @@ def build_excel_bytes(df, resumo, nome_a, nome_b, tolerancia):
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 
-    display_df, divergentes_df, _, faltantes_df, criticos_df = build_export_frames(df)
-    summary_rows = build_export_summary_rows(df, resumo)
+    prepared, display_df, divergentes_df, _, faltantes_df, criticos_df = build_export_frames(df, tolerancia)
+    summary_rows = build_export_summary_rows(df, resumo, tolerancia)
     criteria_rows = build_export_criteria_rows(nome_a, nome_b, tolerancia)
 
     header_fill = PatternFill(fill_type="solid", start_color="10233A", end_color="10233A")
     accent_fill = PatternFill(fill_type="solid", start_color="B6843C", end_color="B6843C")
     even_fill = PatternFill(fill_type="solid", start_color="F8FAFC", end_color="F8FAFC")
+    missing_fill = PatternFill(fill_type="solid", start_color="FFF7ED", end_color="FFF7ED")
+    diff_critical_fill = PatternFill(fill_type="solid", start_color="FEE2E2", end_color="FEE2E2")
+    diff_tolerance_fill = PatternFill(fill_type="solid", start_color="E8F3FF", end_color="E8F3FF")
     border = Border(
         left=Side(style="thin", color="D5DCE6"),
         right=Side(style="thin", color="D5DCE6"),
@@ -2095,6 +3026,15 @@ def build_excel_bytes(df, resumo, nome_a, nome_b, tolerancia):
         "Faltante no A": PatternFill(fill_type="solid", start_color="FEF3C7", end_color="FEF3C7"),
         "Faltante no B": PatternFill(fill_type="solid", start_color="FEF3C7", end_color="FEF3C7"),
     }
+    company_columns = {"Empresa A", "Empresa B", "Dif. Empresa"}
+    driver_columns = {"Motorista A", "Motorista B", "Diferença"}
+
+    def visual_fill(bucket):
+        if bucket == "critical":
+            return diff_critical_fill
+        if bucket == "tolerance":
+            return diff_tolerance_fill
+        return None
 
     def style_header(ws, row_index, accent=False):
         fill = accent_fill if accent else header_fill
@@ -2109,7 +3049,7 @@ def build_excel_bytes(df, resumo, nome_a, nome_b, tolerancia):
             width = max(len(str(cell.value or "")) for cell in column_cells)
             ws.column_dimensions[get_column_letter(column_cells[0].column)].width = min(width + 3, 42)
 
-    def write_table_sheet(ws, title, frame):
+    def write_table_sheet(ws, title, frame, source_prepared):
         ws.append([title])
         ws["A1"].font = Font(size=14, bold=True, color="10233A")
         ws.append([f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"])
@@ -2123,15 +3063,27 @@ def build_excel_bytes(df, resumo, nome_a, nome_b, tolerancia):
         style_header(ws, ws.max_row)
         ws.freeze_panes = "A9"
 
-        for index, row in enumerate(frame.itertuples(index=False), start=10):
-            ws.append(list(row))
-            fill = status_fills.get(getattr(row, "Status", ""), None)
-            for cell in ws[index]:
+        for excel_row, (source_index, row) in enumerate(frame.iterrows(), start=10):
+            ws.append(row.tolist())
+            meta = source_prepared.loc[source_index] if source_index in source_prepared.index else None
+            is_missing = bool(meta is not None and meta.get("_Linha Visual") == "missing")
+            empresa_fill = visual_fill(meta.get("_Empresa Visual")) if meta is not None else None
+            motorista_fill = visual_fill(meta.get("_Motorista Visual")) if meta is not None else None
+
+            for col_pos, cell in enumerate(ws[excel_row], start=1):
+                column_name = frame.columns[col_pos - 1]
                 cell.border = border
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
-                if fill:
-                    cell.fill = fill
-                elif index % 2 == 0:
+
+                if is_missing:
+                    cell.fill = missing_fill
+                elif column_name == "Status":
+                    cell.fill = status_fills.get(row.get("Status"), even_fill if excel_row % 2 == 0 else PatternFill(fill_type=None))
+                elif column_name in company_columns and empresa_fill:
+                    cell.fill = empresa_fill
+                elif column_name in driver_columns and motorista_fill:
+                    cell.fill = motorista_fill
+                elif excel_row % 2 == 0:
                     cell.fill = even_fill
 
     buf = io.BytesIO()
@@ -2162,10 +3114,10 @@ def build_excel_bytes(df, resumo, nome_a, nome_b, tolerancia):
             cell.border = border
             cell.alignment = Alignment(vertical="top", wrap_text=True)
 
-    write_table_sheet(wb.create_sheet("Críticos e Faltantes"), "Divergentes e Faltantes", criticos_df)
-    write_table_sheet(wb.create_sheet("Conferência Detalhada"), "Conferência Detalhada", display_df)
-    write_table_sheet(wb.create_sheet("Divergentes Reais"), "Divergentes Reais", divergentes_df)
-    write_table_sheet(wb.create_sheet("Faltantes"), "Faltantes", faltantes_df)
+    write_table_sheet(wb.create_sheet("Críticos e Faltantes"), "Divergentes e Faltantes", criticos_df, prepared)
+    write_table_sheet(wb.create_sheet("Conferência Detalhada"), "Conferência Detalhada", display_df, prepared)
+    write_table_sheet(wb.create_sheet("Divergentes Reais"), "Divergentes Reais", divergentes_df, prepared)
+    write_table_sheet(wb.create_sheet("Faltantes"), "Faltantes", faltantes_df, prepared)
 
     for ws in wb.worksheets:
         autosize_columns(ws)
@@ -2185,8 +3137,8 @@ def build_executive_pdf_bytes(df, resumo, nome_a, nome_b, tolerancia):
     from reportlab.lib.units import cm
     from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-    _, divergentes_df, _, faltantes_df, criticos_df = build_export_frames(df)
-    summary_rows = [["Métrica", "Valor"]] + build_export_summary_rows(df, resumo)
+    _, _, divergentes_df, _, faltantes_df, criticos_df = build_export_frames(df, tolerancia)
+    summary_rows = [["Métrica", "Valor"]] + build_export_summary_rows(df, resumo, tolerancia)
     criteria_rows = build_export_criteria_rows(nome_a, nome_b, tolerancia)
 
     def append_table(story, title, frame, columns, widths, empty_message, heading_style, body_style, max_rows=30, new_page=False):
@@ -2332,8 +3284,8 @@ def build_detailed_pdf_bytes(df, resumo, nome_a, nome_b, tolerancia):
     from reportlab.lib.units import cm
     from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-    display_df, _, tolerancia_df, faltantes, criticos = build_export_frames(df)
-    summary_rows = [["Métrica", "Valor"]] + build_export_summary_rows(df, resumo)
+    _, display_df, _, tolerancia_df, faltantes, criticos = build_export_frames(df, tolerancia)
+    summary_rows = [["Métrica", "Valor"]] + build_export_summary_rows(df, resumo, tolerancia)
     criteria_rows = build_export_criteria_rows(nome_a, nome_b, tolerancia)
 
     def append_table(story, title, frame, columns, widths, empty_message, heading_style, body_style, max_rows=45, new_page=False):
@@ -2977,16 +3929,47 @@ def status_badge_html(value):
     return f'<span class="table-badge {tone}">{safe_text(value)}</span>'
 
 
+def get_table_row_class(row_meta):
+    if row_meta.get("_Linha Visual") == "missing":
+        return "row-missing"
+    return ""
+
+
+def get_table_cell_class(column, row_meta, money_columns):
+    classes = []
+    if column in money_columns:
+        classes.append("cell-money")
+    elif column == "Observação":
+        classes.append("cell-observation")
+    elif column == "CTE":
+        classes.append("cell-cte")
+
+    if row_meta.get("_Linha Visual") != "missing":
+        if column in {"Empresa A", "Empresa B", "Dif. Empresa"}:
+            if row_meta.get("_Empresa Visual") == "critical":
+                classes.append("cell-diff-critical")
+            elif row_meta.get("_Empresa Visual") == "tolerance":
+                classes.append("cell-diff-tolerance")
+        elif column in {"Motorista A", "Motorista B", "Diferença"}:
+            if row_meta.get("_Motorista Visual") == "critical":
+                classes.append("cell-diff-critical")
+            elif row_meta.get("_Motorista Visual") == "tolerance":
+                classes.append("cell-diff-tolerance")
+
+    return " ".join(classes)
+
+
 def render_table(df):
-    prepared = prepare_conference_dataframe(df)
+    tolerancia_visual = resolve_tolerance_value(st.session_state.get("tol", 0.50))
+    prepared = prepare_conference_dataframe(df, tolerancia_visual)
 
     with st.container(border=True):
         st.markdown(
             """
-            <div class="panel-title" style="min-height:64px;padding:0;border-bottom:1px solid #eeedf3;margin-bottom:18px;">
+            <div class="section-head" style="margin-bottom:14px;">
                 <div>
-                    <h3>Conferência detalhada das diferenças</h3>
-                    <div class="panel-subtitle">Visualize divergentes reais, diferenças dentro da tolerância, faltantes e OK sem diferença para amostragem.</div>
+                    <h3 class="section-title">Conferência detalhada das diferenças</h3>
+                    <div class="section-subtitle">Visualize divergentes, arredondamentos e faltantes com destaque apenas no campo que divergiu.</div>
                 </div>
             </div>
             """,
@@ -3004,9 +3987,9 @@ def render_table(df):
         with c1:
             search = st.text_input("Buscar CTE", placeholder="Ex.: 1752")
         with c2:
-            scope = st.selectbox("Visão", CONFERENCE_FILTER_LABELS)
+            scope = st.selectbox("Status", CONFERENCE_FILTER_LABELS)
         with c3:
-            diff_label = st.selectbox("Mostrar diferenças a partir de", list(VISUAL_DIFF_FILTERS.keys()), index=0)
+            diff_label = st.selectbox("Diferença mínima", list(VISUAL_DIFF_FILTERS.keys()), index=0)
             if diff_label == "Personalizado":
                 diff = st.number_input("Valor personalizado (R$)", min_value=0.0, value=0.01, step=0.01, format="%.2f")
             else:
@@ -3014,8 +3997,8 @@ def render_table(df):
         with c4:
             order = st.selectbox("Ordenar por", ["Maior diferença", "CTE crescente", "Status"])
 
-        visible = apply_conference_filters(prepared, scope, diff, search, order)
-        visible, money_columns = build_conference_display_table(visible)
+        visible_prepared = apply_conference_filters(prepared, scope, diff, search, order)
+        visible, money_columns = build_conference_display_table(visible_prepared)
 
         header_html = ''.join(
             f'<th class="{"cell-money" if column in money_columns else "cell-observation" if column == "Observação" else "cell-cte" if column == "CTE" else ""}">{safe_text(column)}</th>'
@@ -3023,16 +4006,17 @@ def render_table(df):
         )
 
         row_html = []
-        for _, row in visible.iterrows():
+        for row_index, row in visible.iterrows():
+            row_meta = visible_prepared.loc[row_index]
             cells = []
             for column in visible.columns:
                 value = row[column]
                 if column == "Status":
                     cells.append(f'<td>{status_badge_html(value)}</td>')
                 else:
-                    css_class = "cell-money" if column in money_columns else "cell-observation" if column == "Observação" else "cell-cte" if column == "CTE" else ""
+                    css_class = get_table_cell_class(column, row_meta, money_columns)
                     cells.append(f'<td class="{css_class}">{safe_text(value)}</td>')
-            row_html.append(f'<tr>{"".join(cells)}</tr>')
+            row_html.append(f'<tr class="{get_table_row_class(row_meta)}">{"".join(cells)}</tr>')
 
         if not row_html:
             row_html.append(f'<tr><td class="cell-empty" colspan="{len(visible.columns)}">Nenhum registro encontrado com os filtros atuais.</td></tr>')
@@ -3338,20 +4322,450 @@ def update_processing_view(status_box, current_step, progress_value, progress_te
         render_processing_card(current_step=current_step, current_label=progress_text)
         st.progress(progress_value, text=progress_text)
 
-page = render_sidebar()
+def clear_audit_workspace():
+    reset_audit_state()
+    for key in list(st.session_state.keys()):
+        if key.startswith("up_a_widget_") or key.startswith("up_b_widget_"):
+            st.session_state.pop(key, None)
+    for prefix in ["up_a", "up_b"]:
+        st.session_state.pop(f"{prefix}_stored", None)
+        st.session_state.pop(prefix, None)
+        version_key = f"{prefix}_widget_version"
+        st.session_state[version_key] = int(st.session_state.get(version_key, 0) or 0) + 1
+    st.session_state.pop("audit_error", None)
+    st.session_state.pop("audit_error_details", None)
+    st.session_state.pop("audit_debug", None)
+    st.session_state.processing = False
 
-if page in ["Dashboard", "Nova Auditoria"]:
-    render_topbar("Nova Auditoria")
-    render_breadcrumb("FreteScan", "Nova Auditoria")
 
-    render_hero()
+def render_app_header():
+    st.markdown(
+        f"""
+        <div class="compact-header-shell">
+            <div class="compact-header">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+                    <div class="compact-brand">
+                        <div class="compact-brand-mark">{fretevision_mark(48)}</div>
+                        <div>
+                            <div class="compact-brand-title">FRETE<strong>VISION</strong></div>
+                            <div class="compact-brand-subtitle">{safe_text(BRAND_TAGLINE)}</div>
+                        </div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                        <span class="upload-ready-chip">Nova Auditoria</span>
+                        <span class="header-status-pill">Online</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    col_left, col_right = st.columns([1.55, 1], gap="large")
-    with col_left:
-        file_a, file_b = render_upload_section()
-    with col_right:
-        render_ops_panel()
-        tolerance = render_tolerance_section()
+
+def render_compact_menu():
+    pages = ["Auditoria", "Visão que move resultados", "Suporte Técnico", "Novidades"]
+    if "main_page" not in st.session_state or st.session_state.main_page not in pages:
+        st.session_state.main_page = "Auditoria"
+    st.markdown('<div class="menu-shell"><div class="menu-caption">Menu</div></div>', unsafe_allow_html=True)
+    return st.radio(
+        "Menu principal",
+        pages,
+        key="main_page",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+
+def render_tolerance_section():
+    with st.container(border=True):
+        head_left, head_right = st.columns([7, 1.35], gap="small")
+        with head_left:
+            st.markdown(
+                """
+                <div class="section-head">
+                    <h3 class="section-title">Nova Auditoria</h3>
+                    <div class="section-subtitle">Configure a tolerância e envie os dois relatórios do mesmo período.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with head_right:
+            if st.button("Limpar", key="clear_workspace", width="stretch"):
+                clear_audit_workspace()
+                st.rerun()
+
+        label_col, radio_col = st.columns([1.6, 6], gap="small")
+        with label_col:
+            st.markdown('<div class="compact-field-label">Tolerância de diferença</div>', unsafe_allow_html=True)
+        with radio_col:
+            opts = {"R$ 0,00": 0.0, "R$ 0,30": 0.30, "R$ 0,50": 0.50, "R$ 1,00": 1.0, "Personalizado": -1}
+            selected = st.radio("Tolerância", list(opts.keys()), index=2, horizontal=True, label_visibility="collapsed")
+            value = opts[selected]
+            if value == -1:
+                value = st.number_input("Valor personalizado (R$)", 0.0, 999.0, 0.50, 0.10, format="%.2f")
+        return value
+
+
+def render_upload_box(title, description, key):
+    stored_key = f"{key}_stored"
+    version_key = f"{key}_widget_version"
+    legacy_upload = st.session_state.get(key)
+    if st.session_state.get(stored_key) is None and legacy_upload is not None and hasattr(legacy_upload, "getvalue"):
+        st.session_state[stored_key] = serialize_uploaded_file(legacy_upload)
+        st.session_state.pop(key, None)
+
+    current_file = st.session_state.get(stored_key)
+    widget_version = int(st.session_state.get(version_key, 0) or 0)
+    widget_key = f"{key}_widget_{widget_version}"
+
+    with st.container(border=True):
+        st.markdown(
+            f"""
+            <div class="upload-panel-head">
+                <div class="upload-panel-icon">{icon_doc(18)}</div>
+                <div>
+                    <div class="upload-panel-title">{safe_text(title)}</div>
+                    <div class="upload-panel-subtitle">{safe_text(description)}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if current_file is None:
+            uploaded = st.file_uploader(title, type=["pdf"], key=widget_key, label_visibility="collapsed")
+            if uploaded:
+                st.session_state[stored_key] = serialize_uploaded_file(uploaded)
+                st.session_state.pop(widget_key, None)
+                st.rerun()
+            return None
+
+        st.markdown(
+            f"""
+            <div class="upload-ready-bar">
+                <span class="upload-ready-state"><span class="upload-ready-dot"></span>Arquivo carregado</span>
+                <span class="upload-ready-chip">{safe_text(get_upload_name(current_file))} • {safe_text(file_size(current_file))}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        action_col_a, action_col_b = st.columns(2, gap="small")
+        with action_col_a:
+            if st.button("Trocar arquivo", key=f"{key}_replace", width="stretch"):
+                st.session_state.pop(stored_key, None)
+                st.session_state.pop(widget_key, None)
+                st.session_state[version_key] = widget_version + 1
+                reset_audit_state()
+                st.session_state.audit_error = None
+                st.session_state.audit_error_details = []
+                st.rerun()
+        with action_col_b:
+            if st.button("Remover arquivo", key=f"{key}_remove", width="stretch"):
+                st.session_state.pop(stored_key, None)
+                st.session_state.pop(widget_key, None)
+                st.session_state[version_key] = widget_version + 1
+                reset_audit_state()
+                st.session_state.audit_error = None
+                st.session_state.audit_error_details = []
+                st.rerun()
+        return current_file
+
+
+def render_upload_section():
+    col_a, col_b = st.columns(2, gap="medium")
+    with col_a:
+        file_a = render_upload_box("Sistema A (Relatório DL)", "Upload do relatório principal da empresa.", "up_a")
+    with col_b:
+        file_b = render_upload_box("Sistema B (Relatório Carreteiro)", "Upload do relatório de conferência.", "up_b")
+    return file_a, file_b
+
+
+def render_kpis(resumo, df):
+    faltantes_total = int(resumo["faltantes_a"]) + int(resumo["faltantes_b"])
+    tolerance_text = br_money(st.session_state.get("tol", 0.50))
+    summary_html = (
+        '<div class="section-head" style="margin-top:10px;">'
+        '<h3 class="section-title">Resumo da auditoria</h3>'
+        '<div class="section-subtitle">Resultado direto da comparação entre os dois relatórios processados.</div>'
+        '</div>'
+        '<div class="summary-grid">'
+        f'<div class="summary-card"><small>Total analisado</small><b>{safe_text(resumo["total"])}</b><span>Tolerância: {safe_text(tolerance_text)}</span></div>'
+        f'<div class="summary-card ok"><small>OK</small><b>{safe_text(resumo["ok"])}</b><span>Sem diferença identificada</span></div>'
+        f'<div class="summary-card round"><small>OK Arred.</small><b>{safe_text(resumo["ok_arredondamento"])}</b><span>Diferenças dentro da tolerância</span></div>'
+        f'<div class="summary-card div"><small>Divergentes reais</small><b>{safe_text(resumo["divergentes"])}</b><span>Acima da tolerância configurada</span></div>'
+        f'<div class="summary-card miss"><small>Faltantes</small><b>{safe_text(faltantes_total)}</b><span>No A: {safe_text(resumo["faltantes_a"])} • No B: {safe_text(resumo["faltantes_b"])}</span></div>'
+        f'<div class="summary-card impact"><small>Impacto crítico total</small><b>{safe_text(br_money(resumo["impacto_absoluto"]))}</b><span>Não inclui OK por arredondamento</span></div>'
+        '</div>'
+        '<div class="summary-note">Diferenças dentro da tolerância continuam visíveis para conferência na tabela, mas não compõem o impacto crítico.</div>'
+    )
+    st.markdown(summary_html, unsafe_allow_html=True)
+
+
+def render_chart(df):
+    counts = (
+        df["Status"]
+        .astype(str)
+        .replace({"OK por arredondamento": "OK Arred."})
+        .value_counts()
+        .reindex(["OK", "OK Arred.", "Divergente", "Faltante no A", "Faltante no B"], fill_value=0)
+        .rename_axis("Status")
+        .reset_index(name="Qtd")
+    )
+    counts = counts[counts["Qtd"] > 0].copy()
+    if counts.empty:
+        return
+
+    colors = {
+        "OK": "#16A34A",
+        "OK Arred.": "#2563EB",
+        "Divergente": "#DC2626",
+        "Faltante no A": "#F97316",
+        "Faltante no B": "#FB923C",
+    }
+    total = int(counts["Qtd"].sum())
+    fig = px.pie(
+        counts,
+        names="Status",
+        values="Qtd",
+        color="Status",
+        hole=0.72,
+        color_discrete_map=colors,
+    )
+    fig.update_traces(
+        sort=False,
+        direction="clockwise",
+        textinfo="none",
+        hovertemplate="<b>%{label}</b><br>%{value} CTEs<extra></extra>",
+        marker=dict(line=dict(color="#ffffff", width=3)),
+    )
+    fig.update_layout(
+        template="plotly_white",
+        height=300,
+        margin=dict(l=10, r=10, t=8, b=44),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#111827", size=13),
+        legend=dict(
+            orientation="h",
+            y=-0.08,
+            x=0.0,
+            yanchor="top",
+            xanchor="left",
+            title_text="",
+            font=dict(color="#111827", size=12),
+        ),
+        annotations=[
+            dict(
+                text=f"<b>{total}</b><br>Total",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(color="#111827", size=16),
+            )
+        ],
+    )
+
+    with st.container(border=True):
+        st.markdown(
+            """
+            <div class="section-head chart-shell">
+                <h3 class="section-title">Status da auditoria</h3>
+                <div class="section-subtitle">Leitura rápida da distribuição por classificação, com foco em conferência e visibilidade.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def render_exports(df, resumo, name_a, name_b, tolerance):
+    st.markdown(
+        """
+        <div class="section-head export-actions">
+            <h3 class="section-title">Exportações</h3>
+            <div class="export-note">Baixe CSV, Excel e os dois PDFs no mesmo padrão visual da conferência.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3, c4 = st.columns(4, gap="small")
+    with c1:
+        st.download_button("Baixar CSV", auditoria_io.exportar_csv(df), "auditoria.csv", "text/csv", width="stretch")
+    with c2:
+        st.download_button("Baixar Excel", build_excel_bytes(df, resumo, name_a, name_b, tolerance), "auditoria.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+    with c3:
+        st.download_button("Baixar PDF Executivo", build_executive_pdf_bytes(df, resumo, name_a, name_b, tolerance), "auditoria_executiva.pdf", "application/pdf", width="stretch")
+    with c4:
+        st.download_button("Baixar PDF de Conferência Detalhada", build_detailed_pdf_bytes(df, resumo, name_a, name_b, tolerance), "auditoria_conferencia_detalhada.pdf", "application/pdf", width="stretch")
+
+
+def render_marketing_page():
+    st.markdown(
+        f"""
+        <div class="marketing-hero">
+            <div class="marketing-card">
+                <div class="marketing-kicker">Frete Vision</div>
+                <div class="marketing-title">Visão que move resultados.</div>
+                <div class="marketing-copy">
+                    Uma plataforma criada para transformar conferência logística em leitura executiva clara.
+                    O produto evidencia divergências por CTE, revela impacto real e entrega auditoria pronta para operação,
+                    apresentação comercial e amostragem com a cliente.
+                </div>
+                <div class="marketing-chip-row">
+                    <span class="marketing-chip">Comparação precisa por CTE</span>
+                    <span class="marketing-chip">Conferência visual por campo</span>
+                    <span class="marketing-chip">PDF executivo e detalhado</span>
+                    <span class="marketing-chip">Diferenças de centavos visíveis</span>
+                </div>
+                <div class="summary-note" style="margin-top:18px;">
+                    A aba <b>Auditoria</b> continua isolada para uso operacional. Esta área fica dedicada à apresentação do produto.
+                </div>
+            </div>
+            <div class="marketing-visual">
+                <div class="visual-glow"></div>
+                <div class="visual-signature">{fretevision_signature()}</div>
+                <div class="visual-float-row">
+                    <div class="visual-stat">
+                        <small>Leitura</small>
+                        <b>Clara e imediata</b>
+                    </div>
+                    <div class="visual-stat">
+                        <small>Conferência</small>
+                        <b>CTE por CTE</b>
+                    </div>
+                    <div class="visual-stat">
+                        <small>Saídas</small>
+                        <b>PDF + Excel</b>
+                    </div>
+                </div>
+                <div class="visual-board">
+                    <div class="visual-board-title">Visão resumida da operação</div>
+                    <div class="visual-bars">
+                        <div class="visual-bar-row">
+                            <div class="visual-bar-label">OK</div>
+                            <div class="visual-bar-track"><div class="visual-bar-fill" style="width:72%;background:#22c55e;"></div></div>
+                            <div class="visual-bar-value">72</div>
+                        </div>
+                        <div class="visual-bar-row">
+                            <div class="visual-bar-label">OK Arred.</div>
+                            <div class="visual-bar-track"><div class="visual-bar-fill" style="width:54%;background:#3b82f6;"></div></div>
+                            <div class="visual-bar-value">54</div>
+                        </div>
+                        <div class="visual-bar-row">
+                            <div class="visual-bar-label">Diverg.</div>
+                            <div class="visual-bar-track"><div class="visual-bar-fill" style="width:41%;background:#ef4444;"></div></div>
+                            <div class="visual-bar-value">41</div>
+                        </div>
+                        <div class="visual-bar-row">
+                            <div class="visual-bar-label">Faltantes</div>
+                            <div class="visual-bar-track"><div class="visual-bar-fill" style="width:18%;background:#f59e0b;"></div></div>
+                            <div class="visual-bar-value">18</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="marketing-shell" style="margin-top:18px;">
+            <div class="marketing-card">
+                <div class="marketing-kicker">Produto</div>
+                <div class="marketing-title" style="font-size:1.75rem;">Apresente valor sem perder precisão.</div>
+                <div class="marketing-copy">
+                    A primeira impressão é elegante e comercial. A segunda tela é objetiva, operacional e pronta para auditar.
+                    Isso permite vender a solução e, no mesmo ambiente, executar a conferência real com segurança.
+                </div>
+            </div>
+            <div class="marketing-card">
+                <div class="marketing-kicker">Uso prático</div>
+                <div class="marketing-title" style="font-size:1.75rem;">Uma experiência mais moderna e intuitiva.</div>
+                <div class="marketing-copy">
+                    Cartões com profundidade, tipografia mais forte, áreas de upload mais vivas e uma linguagem visual
+                    mais atual, mantendo os resultados já validados exatamente como estão.
+                </div>
+            </div>
+        </div>
+        <div class="marketing-grid" style="margin-top:16px;">
+            <div class="marketing-feature">
+                <small>Conferência</small>
+                <b>Diferença exata por campo</b>
+                <span>Empresa, motorista, maior diferença, margem GW e observação aparecem no mesmo fluxo de leitura.</span>
+            </div>
+            <div class="marketing-feature">
+                <small>Confiabilidade</small>
+                <b>Mesmos números validados</b>
+                <span>O visual evolui sem alterar motor, parser, cálculo, tolerância, cruzamento ou regra de status.</span>
+            </div>
+            <div class="marketing-feature">
+                <small>Apresentação</small>
+                <b>Marca mais viva</b>
+                <span>Sombras, gradientes, volumes e tipografia ajudam o produto a parecer mais premium na demonstração.</span>
+            </div>
+            <div class="marketing-feature">
+                <small>Operação</small>
+                <b>Auditoria continua limpa</b>
+                <span>A área operacional segue direta: upload, processamento, resumo, gráfico e tabela completa.</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_support_page():
+    with st.container(border=True):
+        st.markdown(
+            """
+            <div class="section-head">
+                <h3 class="section-title">Suporte Técnico</h3>
+                <div class="section-subtitle">Canal rápido para dúvidas operacionais e acompanhamento da apresentação.</div>
+            </div>
+            <div class="summary-note">
+                Em caso de dúvida na leitura dos relatórios, confira o expander <b>Debug da leitura</b> na própria tela de auditoria.
+                Para atendimento, utilize o contato interno da operação.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def render_news_page():
+    with st.container(border=True):
+        st.markdown(
+            """
+            <div class="section-head">
+                <h3 class="section-title">Novidades</h3>
+                <div class="section-subtitle">Resumo curto das evoluções mais importantes da interface.</div>
+            </div>
+            <div class="summary-note">
+                Novo layout compacto, uploads persistentes, tabela com destaque por campo divergente,
+                coluna <b>Margem GW</b>, conferência detalhada, PDF executivo e PDF completo de conferência.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def render_footer():
+    st.markdown(
+        """
+        <div class="compact-footer">
+            © 2026 FreteVision Logística<br>
+            Desenvolvido por Mateus
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+render_app_header()
+page = render_compact_menu()
+
+if page == "Visão que move resultados":
+    render_marketing_page()
+
+elif page == "Auditoria":
+    tolerance = render_tolerance_section()
+    file_a, file_b = render_upload_section()
 
     if "processing" not in st.session_state:
         st.session_state.processing = False
@@ -3362,9 +4776,9 @@ if page in ["Dashboard", "Nova Auditoria"]:
     if "audit_debug" not in st.session_state:
         st.session_state.audit_debug = None
 
-    button_col_1, button_col_2, button_col_3 = st.columns([1.05, 1.4, 1.05])
+    button_col_1, button_col_2, button_col_3 = st.columns([1.7, 1.5, 1.7])
     with button_col_2:
-        clicked = st.button("Processar auditoria", type="primary", width="stretch", disabled=st.session_state.processing)
+        clicked = st.button("Iniciar Auditoria", type="primary", width="stretch", disabled=st.session_state.processing)
 
     status_box = st.empty()
     debug_box = st.empty()
@@ -3408,6 +4822,7 @@ if page in ["Dashboard", "Nova Auditoria"]:
             resultado = auditar(caminho_a, caminho_b, tolerance_dec)
             update_processing_view(status_box, 4, 78, "Aplicando tolerância")
             result_df = linhas_para_dataframe(resultado["linhas"])
+            result_df = aplicar_margens_gw_visual(result_df, caminho_b)
             summary = normalizar_resumo_motor(resultado["resumo"])
 
             set_audit_debug(
@@ -3467,14 +4882,10 @@ if page in ["Dashboard", "Nova Auditoria"]:
             render_table(result)
             render_exports(result, summary, st.session_state["nome_a"], st.session_state["nome_b"], st.session_state["tol"])
 
-elif page == "Histórico":
-    render_history_page()
-elif page == "Relatórios":
-    render_reports_page()
-elif page == "Configurações":
-    render_settings_page()
-elif page == "Sobre":
-    render_about_page()
-else:
-    render_placeholder(page)
+elif page == "Suporte Técnico":
+    render_support_page()
+elif page == "Novidades":
+    render_news_page()
+
+render_footer()
 
